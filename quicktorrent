@@ -1,0 +1,81 @@
+#!/bin/bash
+
+# quicktorrent: Add a .torrent to qBittorrent and only download a specified folder.
+# Usage: quicktorrent "Folder Name To Download"
+
+# ----------- CONFIGURATION -------------
+TORRENT_PATH="/path/to/your/file.torrent"  # <-- CHANGE THIS
+QBITTORRENT_WEBUI="http://127.0.0.1:8080"
+USERNAME="admin"
+PASSWORD="adminadmin"
+# ---------------------------------------
+
+FOLDER_TO_DOWNLOAD="$1"
+
+if [ -z "$FOLDER_TO_DOWNLOAD" ]; then
+    echo "Usage: quicktorrent \"Folder Name To Download\""
+    exit 1
+fi
+
+# Start qBittorrent if not already running
+if ! pgrep -x "qBittorrent" > /dev/null; then
+    echo "Starting qBittorrent..."
+    open -a qBittorrent
+    sleep 5
+fi
+
+# Authenticate
+COOKIE=$(curl -s -i -X POST \
+    -d "username=$USERNAME&password=$PASSWORD" \
+    "$QBITTORRENT_WEBUI/api/v2/auth/login" | \
+    grep -Fi 'set-cookie' | cut -d' ' -f2 | tr -d '\r\n')
+
+if [[ -z "$COOKIE" ]]; then
+    echo "Authentication failed"
+    exit 1
+fi
+
+# Upload torrent
+RESPONSE=$(curl -s -X POST -b "$COOKIE" \
+    -F "torrents=@$TORRENT_PATH" \
+    "$QBITTORRENT_WEBUI/api/v2/torrents/add")
+
+if [[ "$RESPONSE" != "Ok." ]]; then
+    echo "Torrent upload failed: $RESPONSE"
+    exit 1
+fi
+
+echo "Torrent added. Waiting for hash..."
+sleep 5
+
+# Get torrent hash
+TORRENT_LIST=$(curl -s -b "$COOKIE" "$QBITTORRENT_WEBUI/api/v2/torrents/info")
+INFOHASH=$(echo "$TORRENT_LIST" | jq -r ".[] | select(.name | contains(\"$(basename \"$TORRENT_PATH\" .torrent)\")) | .hash")
+
+if [[ -z "$INFOHASH" ]]; then
+    echo "Failed to locate the torrent hash."
+    exit 1
+fi
+
+# Get file list
+FILES=$(curl -s -b "$COOKIE" "$QBITTORRENT_WEBUI/api/v2/torrents/files?hash=$INFOHASH")
+
+# Deselect all
+ALL_INDEXES=$(echo "$FILES" | jq -r '.[].index')
+curl -s -b "$COOKIE" -X POST \
+    -d "hash=$INFOHASH&indexes=$(echo "$ALL_INDEXES" | paste -sd ',' -)" \
+    "$QBITTORRENT_WEBUI/api/v2/torrents/filePrio" > /dev/null
+
+# Select folder
+MATCHING_INDEXES=$(echo "$FILES" | jq -r ".[] | select(.name | startswith(\"$FOLDER_TO_DOWNLOAD/\")) | .index")
+
+if [[ -z "$MATCHING_INDEXES" ]]; then
+    echo "No matching folder found: \"$FOLDER_TO_DOWNLOAD\""
+    exit 1
+fi
+
+curl -s -b "$COOKIE" -X POST \
+    -d "hash=$INFOHASH&indexes=$(echo "$MATCHING_INDEXES" | paste -sd ',' -)" \
+    "$QBITTORRENT_WEBUI/api/v2/torrents/filePrio" > /dev/null
+
+echo "Set download priority for folder: $FOLDER_TO_DOWNLOAD"
